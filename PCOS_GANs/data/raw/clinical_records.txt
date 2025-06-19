@@ -1,0 +1,5 @@
+Patient 1: Irregular menstrual cycles, acne, weight gain. High androgen levels noted.
+Patient 2: Regular menstrual cycles, no significant symptoms.
+Patient 3: Irregular periods, hirsutism, insulin resistance. Multiple ovarian cysts on ultrasound.
+Patient 4: Normal hormone levels, regular cycles, no symptoms.
+Patient 5: Missed periods, acne, hair growth. Elevated testosterone levels. 
