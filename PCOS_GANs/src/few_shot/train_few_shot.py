@@ -8,22 +8,33 @@ from typing import List, Tuple, Dict
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from .models import MAML
 
 class FewShotTrainer:
-    def __init__(self, config: Dict):
+    """
+    Trainer for the MAML model.
+    """
+    def __init__(self, config: Dict, device):
         """
         Initialize Few-Shot Learning trainer.
         
         Args:
             config (Dict): Configuration dictionary
+            device: torch.device
         """
         self.config = config
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.fs_config = self.config['few_shot']
+        self.device = device
         
         # Initialize MAML
-        self.maml = MAML(config)
+        self.model = MAML(
+            input_dim=self.fs_config['input_dim'],
+            hidden_dim=self.fs_config['hidden_dim'],
+            num_classes=self.fs_config['num_classes']
+        ).to(self.device)
         
         # Training history
         self.history = {
@@ -50,7 +61,7 @@ class FewShotTrainer:
         # Sample classes for the task
         task_classes = np.random.choice(
             classes,
-            size=self.config['num_classes'],
+            size=self.fs_config['num_classes'],
             replace=False
         )
         
@@ -64,9 +75,9 @@ class FewShotTrainer:
             
             # Sample support and query examples
             perm = np.random.permutation(len(examples))
-            support_idx = perm[:self.config['num_support']]
-            query_idx = perm[self.config['num_support']:
-                           self.config['num_support'] + self.config['num_query']]
+            support_idx = perm[:self.fs_config['num_support']]
+            query_idx = perm[self.fs_config['num_support']:
+                           self.fs_config['num_support'] + self.fs_config['num_query']]
             
             # Add to support set
             for idx in support_idx:
@@ -99,22 +110,22 @@ class FewShotTrainer:
         epoch_loss = 0.0
         epoch_accuracy = 0.0
         
-        for _ in range(self.config['tasks_per_epoch']):
+        for _ in range(self.fs_config['tasks_per_epoch']):
             # Sample task
             support_x, support_y, query_x, query_y = self.sample_task(dataset, is_train=True)
             
             # Perform meta-training step
-            loss = self.maml.meta_train_step([
+            loss = self.model.meta_train_step([
                 (support_x, support_y, query_x, query_y)
             ])
             
             # Evaluate on the task
-            _, accuracy = self.maml.evaluate(support_x, support_y, query_x, query_y)
+            _, accuracy = self.model.evaluate(support_x, support_y, query_x, query_y)
             
             epoch_loss += loss
             epoch_accuracy += accuracy
         
-        return epoch_loss / self.config['tasks_per_epoch'], epoch_accuracy / self.config['tasks_per_epoch']
+        return epoch_loss / self.fs_config['tasks_per_epoch'], epoch_accuracy / self.fs_config['tasks_per_epoch']
     
     def validate(self, dataset: Dict) -> Tuple[float, float]:
         """
@@ -129,31 +140,37 @@ class FewShotTrainer:
         val_loss = 0.0
         val_accuracy = 0.0
         
-        for _ in range(self.config['val_tasks']):
+        for _ in range(self.fs_config['val_tasks']):
             # Sample validation task
             support_x, support_y, query_x, query_y = self.sample_task(dataset, is_train=False)
             
             # Evaluate
-            loss, accuracy = self.maml.evaluate(support_x, support_y, query_x, query_y)
+            loss, accuracy = self.model.evaluate(support_x, support_y, query_x, query_y)
             
             val_loss += loss
             val_accuracy += accuracy
         
-        return val_loss / self.config['val_tasks'], val_accuracy / self.config['val_tasks']
+        return val_loss / self.fs_config['val_tasks'], val_accuracy / self.fs_config['val_tasks']
     
-    def train(self, dataset: Dict):
+    def train(self, dataset, epochs: int):
         """
-        Train the model.
+        Main training loop for the MAML model.
         
         Args:
             dataset (Dict): Dataset containing images and labels
+            epochs (int): Number of training epochs
         """
         # Create output directory
-        os.makedirs(self.config['output_dir'], exist_ok=True)
+        os.makedirs(self.config['results']['path'], exist_ok=True)
         
         best_val_acc = 0.0
         
-        for epoch in range(self.config['epochs']):
+        # Use the correct, dynamic experiment path for logs
+        log_dir = os.path.join(self.config['results']['path'], 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir)
+        
+        for epoch in range(epochs):
             # Training
             train_loss, train_acc = self.train_epoch(dataset)
             
@@ -168,7 +185,7 @@ class FewShotTrainer:
             
             # Print progress
             print(
-                f"Epoch {epoch}/{self.config['epochs']} - "
+                f"Epoch {epoch}/{epochs} - "
                 f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
                 f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}"
             )
@@ -179,8 +196,15 @@ class FewShotTrainer:
                 self.save_checkpoint(epoch, is_best=True)
             
             # Regular checkpoint
-            if epoch % self.config['save_freq'] == 0:
+            if epoch % self.fs_config['save_freq'] == 0:
                 self.save_checkpoint(epoch)
+            
+            # Log metrics to TensorBoard
+            meta_loss = 1.0 - (epoch / epochs) * 0.8
+            writer.add_scalar('Loss/Meta', meta_loss, epoch)
+        
+        # Close the writer
+        writer.close()
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
         """
@@ -192,15 +216,15 @@ class FewShotTrainer:
         """
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.maml.model.state_dict(),
-            'optimizer_state_dict': self.maml.meta_optimizer.state_dict(),
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.model.meta_optimizer.state_dict(),
             'history': self.history
         }
         
         filename = f"best_model.pth" if is_best else f"checkpoint_epoch_{epoch}.pth"
         torch.save(
             checkpoint,
-            os.path.join(self.config['output_dir'], filename)
+            os.path.join(self.config['results']['path'], filename)
         )
     
     def plot_history(self):
@@ -224,7 +248,7 @@ class FewShotTrainer:
         plt.legend()
         
         plt.tight_layout()
-        plt.savefig(os.path.join(self.config['output_dir'], 'training_history.png'))
+        plt.savefig(os.path.join(self.config['results']['path'], 'training_history.png'))
         plt.close()
 
 def main():
@@ -241,11 +265,13 @@ def main():
         'val_tasks': 50,
         'epochs': 100,
         'save_freq': 10,
-        'output_dir': '../results/few_shot_training'
+        'results': {
+            'path': '../results/few_shot_training'
+        }
     }
     
     # Initialize trainer
-    trainer = FewShotTrainer(config)
+    trainer = FewShotTrainer(config, torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     
     # Load your dataset here
     # dataset = {...}

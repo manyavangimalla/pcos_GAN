@@ -9,8 +9,8 @@ data:
 
 # GAN Configuration
 gan:
+  input_dim: 10
   latent_dim: 100
-  channels: 3
   lr: 0.0002
   b1: 0.5
   b2: 0.999
@@ -19,10 +19,10 @@ gan:
   print_freq: 100
   sample_interval: 400
   save_freq: 10
-  output_dir: 'results/gan_training'
 
 # Few-Shot Learning Configuration
 few_shot:
+  input_dim: 10 # Example: Number of features in hormonal data
   num_classes: 2
   num_support: 5
   num_query: 15
@@ -33,7 +33,6 @@ few_shot:
   val_tasks: 50
   epochs: 100
   save_freq: 10
-  output_dir: 'results/few_shot_training'
 
 # NLP Configuration
 nlp:
@@ -41,7 +40,6 @@ nlp:
   batch_size: 16
   epochs: 5
   max_length: 512
-  output_dir: 'results/nlp'
 
 # Evaluation Configuration
 evaluation:
@@ -51,4 +49,7 @@ evaluation:
     - recall
     - f1
     - auc
-  output_dir: 'results/evaluation' 
+
+# Results Configuration
+results:
+  path: 'results/pcos_detection_default' 

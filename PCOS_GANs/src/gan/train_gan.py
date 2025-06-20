@@ -6,46 +6,52 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision.utils import save_image
+from torchvision.utils import save_image, make_grid
 import numpy as np
 from typing import Dict, Tuple
 import matplotlib.pyplot as plt
 from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from .models import Generator, Discriminator
 
 class GANTrainer:
-    def __init__(self, config: Dict):
+    """
+    Trainer for the GAN model.
+    """
+    def __init__(self, config: Dict, device):
         """
         Initialize GAN trainer with configuration.
         
         Args:
             config (Dict): Configuration dictionary containing hyperparameters
+            device: The device to which the models should be moved
         """
         self.config = config
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.gan_config = self.config['gan']
+        self.device = device
         
         # Initialize networks
         self.generator = Generator(
-            latent_dim=config['latent_dim'],
-            channels=config['channels']
+            latent_dim=self.gan_config['latent_dim'],
+            output_dim=self.gan_config['input_dim']
         ).to(self.device)
-        
         self.discriminator = Discriminator(
-            channels=config['channels']
+            input_dim=self.gan_config['input_dim']
         ).to(self.device)
         
         # Initialize optimizers
         self.optimizer_G = optim.Adam(
             self.generator.parameters(),
-            lr=config['lr'],
-            betas=(config['b1'], config['b2'])
+            lr=self.gan_config['lr'],
+            betas=(self.gan_config['b1'], self.gan_config['b2'])
         )
         
         self.optimizer_D = optim.Adam(
             self.discriminator.parameters(),
-            lr=config['lr'],
-            betas=(config['b1'], config['b2'])
+            lr=self.gan_config['lr'],
+            betas=(self.gan_config['b1'], self.gan_config['b2'])
         )
         
         # Loss function
@@ -81,7 +87,7 @@ class GANTrainer:
         self.optimizer_G.zero_grad()
         
         # Sample noise as generator input
-        z = torch.randn(batch_size, self.config['latent_dim']).to(self.device)
+        z = torch.randn(batch_size, self.gan_config['latent_dim']).to(self.device)
         
         # Generate a batch of images
         gen_imgs = self.generator(z)
@@ -109,17 +115,20 @@ class GANTrainer:
     
     def train(self, dataloader: DataLoader, epochs: int):
         """
-        Train the GAN.
-        
-        Args:
-            dataloader (DataLoader): DataLoader for training data
-            epochs (int): Number of epochs to train
+        Main training loop for the GAN.
         """
-        # Create output directory for generated images
-        os.makedirs(os.path.join('PCOS_GANs', self.config['output_dir']), exist_ok=True)
+        # Use the correct, dynamic experiment path for logs
+        log_dir = os.path.join(self.config['results']['path'], 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir)
         
+        # Fixed noise for consistent visualization
+        fixed_noise = torch.randn(
+            self.gan_config['batch_size'], self.gan_config['latent_dim'], device=self.device
+        )
+
         for epoch in range(epochs):
-            for i, (real_imgs,) in enumerate(dataloader):
+            for i, (real_imgs, _) in enumerate(dataloader):
                 real_imgs = real_imgs.to(self.device)
                 
                 # Train for one step
@@ -130,7 +139,7 @@ class GANTrainer:
                 self.history['G_losses'].append(g_loss)
                 
                 # Print progress
-                if i % self.config['print_freq'] == 0:
+                if i % self.gan_config['print_freq'] == 0:
                     print(
                         f"[Epoch {epoch}/{epochs}] "
                         f"[Batch {i}/{len(dataloader)}] "
@@ -140,12 +149,29 @@ class GANTrainer:
                 
                 # Save generated images periodically
                 batches_done = epoch * len(dataloader) + i
-                if batches_done % self.config['sample_interval'] == 0:
+                if batches_done % self.gan_config['sample_interval'] == 0:
                     self.save_images(batches_done)
+                    # Log generated data distribution to TensorBoard
+                    with torch.no_grad():
+                        gen_data = self.generator(fixed_noise).detach().cpu()
+                        writer.add_histogram('gan/generated_data_distribution', gen_data, batches_done)
+                
+                # Log metrics to TensorBoard
+                writer.add_scalar('Loss/Generator', g_loss.item(), batches_done)
+                writer.add_scalar('Loss/Discriminator', d_loss, batches_done)
             
             # Save model checkpoints
-            if epoch % self.config['save_freq'] == 0:
+            if epoch % self.gan_config['save_freq'] == 0:
                 self.save_checkpoint(epoch)
+            
+            # Log model weights at the end of each epoch
+            for name, param in self.generator.named_parameters():
+                writer.add_histogram(f'Generator/{name}', param.clone().cpu().data.numpy(), epoch)
+            for name, param in self.discriminator.named_parameters():
+                writer.add_histogram(f'Discriminator/{name}', param.clone().cpu().data.numpy(), epoch)
+        
+        # Close the writer
+        writer.close()
     
     def save_images(self, batches_done: int):
         """
@@ -155,14 +181,14 @@ class GANTrainer:
             batches_done (int): Current training iteration
         """
         # Generate images
-        z = torch.randn(16, self.config['latent_dim']).to(self.device)
+        z = torch.randn(16, self.gan_config['latent_dim']).to(self.device)
         gen_imgs = self.generator(z)
         
         # Save images
         save_image(
             gen_imgs.data[:16],
             os.path.join(
-                os.path.join('PCOS_GANs', self.config['output_dir']),
+                self.config['results']['path'],
                 f"images_{batches_done}.png"
             ),
             nrow=4,
@@ -188,7 +214,7 @@ class GANTrainer:
         torch.save(
             checkpoint,
             os.path.join(
-                os.path.join('PCOS_GANs', self.config['output_dir']),
+                self.config['results']['path'],
                 f"checkpoint_epoch_{epoch}.pth"
             )
         )
@@ -201,7 +227,7 @@ class GANTrainer:
         plt.xlabel('Iteration')
         plt.ylabel('Loss')
         plt.legend()
-        plt.savefig(os.path.join(os.path.join('PCOS_GANs', self.config['output_dir']), 'loss_plot.png'))
+        plt.savefig(os.path.join(self.config['results']['path'], 'loss_plot.png'))
         plt.close()
 
 def main():
@@ -222,7 +248,7 @@ def main():
     }
     
     # Initialize trainer
-    trainer = GANTrainer(config)
+    trainer = GANTrainer(config, torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     
     # Load your dataset here
     # Create a dummy dataloader for demonstration
